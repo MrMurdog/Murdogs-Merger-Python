@@ -1,0 +1,103 @@
+{
+  "tcp_host": "0.0.0.0",
+  "tcp_port": 9000,
+
+  "loki": false,
+  "loki_host": "http://127.0.0.1",
+  "loki_port": 3100,
+  "loki_label": "Merger",
+
+  "mtx_homeserver": "https://matrix.example.org",
+  "mtx_user": "@mergerbot:matrix.example.org",
+  "mtx_passwd": "CHANGE_ME_PASSWORD",
+  "mtx_access_token": "",
+  "mtx_deviceId": "MERGERMAIN",
+  "mtx_store_path": "./data/",
+  "mtx_session_file": "./data/matrix_session.json",
+  "mtx_ignore_unverified_devices": true,
+  "mtx_require_encryption": true,
+
+  "default": {
+    "time_window_sec": 60,
+    "output_format": "<u>%timestamp%</u>\n\n%beschreibungen%\n\n<code>%telegram.message%</code>",
+    "beschreibung_format": "<b>%telegram.description.address.long%</b>",
+    "sender": "none",
+    "log_file": "logs/default.log",
+
+    "rc_host": "",
+    "rc_port": "",
+    "rc_user": "",
+    "rc_passwd": "",
+    "rc_channel": "",
+
+    "tg_bot_token": "",
+    "tg_chat_id": "",
+    "tg_parse_mode": "HTML",
+
+    "pushover_app_token": "",
+    "pushover_user_key": "",
+
+    "discord_wh_url": "",
+
+    "mtx_room": ""
+  },
+
+  "profiles": {
+    "Leipzig RD (Telegram+Matrix)": {
+      "time_window_sec": 4,
+      "output_format": "<u>%timestamp%</u>\n\n%beschreibungen%\n\n<code>%telegram.message%</code>",
+      "beschreibung_format": "<b>%telegram.description.address.long%</b> -- <a href='https://example.org/form?id=%enc_ric%'>Link</a>",
+      "sender": "telegram,matrix",
+      "log_file": "logs/leipzig-rd.log",
+
+      "tg_bot_token": "123456:ABCDEF_CHANGE_ME",
+      "tg_chat_id": "-1001234567890",
+      "tg_parse_mode": "HTML",
+
+      "mtx_room": "!exampleRoomId:matrix.example.org"
+    },
+
+    "Leipzig FW (Nur Telegram)": {
+      "time_window_sec": 4,
+      "output_format": "<u>%timestamp%</u>\n\n%beschreibungen%\n\n<code>%telegram.message%</code>",
+      "beschreibung_format": "<b>%telegram.description.address.long%</b>",
+      "sender": "telegram",
+      "log_file": "logs/leipzig-fw.log",
+
+      "tg_bot_token": "123456:ABCDEF_CHANGE_ME",
+      "tg_chat_id": "-1009876543210",
+      "tg_parse_mode": "HTML"
+    },
+
+    "Nordsachsen (Nur Pushover)": {
+      "time_window_sec": 10,
+      "output_format": "%timestamp%\n\n%beschreibungen%",
+      "beschreibung_format": "%telegram.description.address.long%",
+      "sender": "pushover",
+      "log_file": "logs/nordsachsen.log",
+
+      "pushover_app_token": "CHANGE_ME_APP_TOKEN",
+      "pushover_user_key": "CHANGE_ME_USER_KEY"
+    },
+
+    "Demo Discord Webhook": {
+      "time_window_sec": 10,
+      "output_format": "%timestamp%\n%beschreibungen%",
+      "beschreibung_format": "%telegram.description.address.short% - %telegram.description.address.long%",
+      "sender": "discordWh",
+      "discord_wh_url": "https://discord.com/api/webhooks/CHANGE_ME"
+    },
+
+    "Demo Rocket.Chat": {
+      "time_window_sec": 10,
+      "output_format": "%timestamp%\n%beschreibungen%",
+      "beschreibung_format": "%telegram.description.address.long%",
+      "sender": "rocketchat",
+      "rc_host": "https://chat.example.org",
+      "rc_port": "443",
+      "rc_user": "mergerbot",
+      "rc_passwd": "CHANGE_ME",
+      "rc_channel": "#alarms"
+    }
+  }
+}

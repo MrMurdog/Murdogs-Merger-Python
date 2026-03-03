@@ -1,0 +1,30 @@
+# Virtuelle Umgebung
+.venv/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Secrets & Konfiguration
+.env
+*.key
+*.pem
+config.local.*
+
+# IDE
+.idea/
+.vscode/
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# Logs
+*.log
+
+config.json
