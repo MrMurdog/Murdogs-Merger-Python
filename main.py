@@ -295,6 +295,7 @@ class MatrixSender:
         return Path(self._config.mtx_session_file)
 
     def _build_client(self) -> nio.AsyncClient:
+        Path(self._config.mtx_store_path).mkdir(parents=True, exist_ok=True)
         client_config = nio.AsyncClientConfig(encryption_enabled=True)
         return nio.AsyncClient(
             homeserver=self._config.mtx_homeserver,
@@ -341,11 +342,50 @@ class MatrixSender:
         }
         self._session_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
+    async def _whoami_from_token(self, access_token: str) -> dict[str, str]:
+        homeserver = self._config.mtx_homeserver.rstrip("/")
+        url = f"{homeserver}/_matrix/client/v3/account/whoami"
+        headers = {"Authorization": f"Bearer {access_token}"}
+
+        try:
+            response = await asyncio.to_thread(requests.get, url, headers=headers, timeout=15)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            raise RuntimeError(f"Matrix whoami fehlgeschlagen: {exc}") from exc
+
+        user_id = str(payload.get("user_id", "")).strip()
+        device_id = str(payload.get("device_id", "")).strip()
+        if not user_id:
+            raise RuntimeError("Matrix whoami lieferte keine user_id fuer das Access-Token")
+
+        if not device_id:
+            device_id = self._config.mtx_deviceId.strip() or "MERGERMAIN"
+
+        return {
+            "user_id": user_id,
+            "device_id": device_id,
+            "access_token": access_token,
+        }
+
     async def connect(self) -> None:
+        session = self._load_session()
+        use_explicit_token = bool(self._config.mtx_access_token)
+        if use_explicit_token and session is not None and session["access_token"] != self._config.mtx_access_token:
+            session = None
+
+        token_session: dict[str, str] | None = None
+        if session is not None:
+            self._resolved_user = session["user_id"]
+        elif use_explicit_token:
+            token_session = await self._whoami_from_token(self._config.mtx_access_token)
+            self._resolved_user = token_session["user_id"]
+        elif not self._resolved_user:
+            raise RuntimeError("Fuer Matrix Passwort-Login ist mtx_user erforderlich")
+
         self._client = self._build_client()
         client = self.client
 
-        session = self._load_session()
         if session is not None:
             client.restore_login(
                 user_id=session["user_id"],
@@ -353,16 +393,19 @@ class MatrixSender:
                 access_token=session["access_token"],
             )
             print(f"Matrix Session wiederhergestellt mit Device {session['device_id']}")
-        elif self._config.mtx_access_token:
-            if not self._resolved_user or not self._config.mtx_deviceId:
-                raise RuntimeError("Fuer mtx_access_token sind mtx_user und mtx_deviceId erforderlich")
+        elif use_explicit_token:
+            assert token_session is not None
             client.restore_login(
-                user_id=self._resolved_user,
-                device_id=self._config.mtx_deviceId,
-                access_token=self._config.mtx_access_token,
+                user_id=token_session["user_id"],
+                device_id=token_session["device_id"],
+                access_token=token_session["access_token"],
             )
-            self._save_session(self._resolved_user, self._config.mtx_deviceId, self._config.mtx_access_token)
-            print(f"Matrix Token-Login aktiv mit Device {self._config.mtx_deviceId}")
+            self._save_session(
+                token_session["user_id"],
+                token_session["device_id"],
+                token_session["access_token"],
+            )
+            print(f"Matrix Token-Login aktiv mit Device {token_session['device_id']}")
         else:
             if not self._config.mtx_passwd:
                 raise RuntimeError("Matrix Passwort fehlt (mtx_passwd) und kein mtx_access_token gesetzt")
@@ -653,7 +696,7 @@ async def main() -> None:
 
     CONFIG = load_config(config_path)
 
-    matrix_enabled = bool(CONFIG.mtx_homeserver and CONFIG.mtx_user and (CONFIG.mtx_passwd or CONFIG.mtx_access_token))
+    matrix_enabled = bool(CONFIG.mtx_homeserver and (CONFIG.mtx_access_token or (CONFIG.mtx_user and CONFIG.mtx_passwd)))
     if matrix_enabled:
         await create_matrix_client()
 

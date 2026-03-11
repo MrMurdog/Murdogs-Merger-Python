@@ -8,9 +8,9 @@
   "loki_label": "Merger",
 
   "mtx_homeserver": "https://matrix.example.org",
-  "mtx_user": "@mergerbot:matrix.example.org",
-  "mtx_passwd": "CHANGE_ME_PASSWORD",
-  "mtx_access_token": "",
+  "mtx_user": "",
+  "mtx_passwd": "",
+  "mtx_access_token": "CHANGE_ME_PERSONAL_ACCESS_TOKEN",
   "mtx_deviceId": "MERGERMAIN",
   "mtx_store_path": "./data/",
   "mtx_session_file": "./data/matrix_session.json",
