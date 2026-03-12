@@ -62,6 +62,7 @@ class Config:
     mtx_user: str = "user:matrix.org"
     mtx_passwd: str = "EinPasswort"
     mtx_access_token: str = ""
+    mtx_displayName: str = ""
     mtx_deviceId: str = "Mergerbot".upper()
     mtx_store_path: str = "./data/"
     mtx_session_file: str = "./data/matrix_session.json"
@@ -130,6 +131,7 @@ def load_config(path: Path) -> Config:
         mtx_user=str(raw.get("mtx_user", raw.get("mtx_user_id", ""))),
         mtx_passwd=str(raw.get("mtx_passwd", raw.get("mtx_password", ""))),
         mtx_access_token=str(raw.get("mtx_access_token", "")),
+        mtx_displayName=str(raw.get("mtx_displayName", raw.get("mtx_display_name", ""))),
         mtx_deviceId=str(raw.get("mtx_deviceId", raw.get("mtx_device_id", "MERGERMAIN"))),
         mtx_store_path=str(raw.get("mtx_store_path", "./data/")),
         mtx_session_file=str(raw.get("mtx_session_file", "./data/matrix_session.json")),
@@ -283,6 +285,7 @@ class MatrixSender:
         self._client: nio.AsyncClient | None = None
         self._resolved_user = self._normalize_user_id(config.mtx_user, config.mtx_homeserver)
         self._sync_task: asyncio.Task[None] | None = None
+        self._verification_lock = asyncio.Lock()
 
     @property
     def client(self) -> nio.AsyncClient:
@@ -368,6 +371,152 @@ class MatrixSender:
             "access_token": access_token,
         }
 
+    def _get_access_token(self) -> str:
+        token = str(getattr(self.client, "access_token", "") or "").strip()
+        if not token:
+            raise RuntimeError("Matrix Access-Token ist nach dem Login nicht verfuegbar")
+        return token
+
+    async def _get_display_name(self, user_id: str) -> str:
+        homeserver = self._config.mtx_homeserver.rstrip("/")
+        safe_user_id = requests.utils.quote(user_id, safe="")
+        url = f"{homeserver}/_matrix/client/v3/profile/{safe_user_id}/displayname"
+        headers = {"Authorization": f"Bearer {self._get_access_token()}"}
+
+        try:
+            response = await asyncio.to_thread(requests.get, url, headers=headers, timeout=15)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            raise RuntimeError(f"Matrix displayname-Abfrage fehlgeschlagen: {exc}") from exc
+
+        return str(payload.get("displayname", "") or "")
+
+    async def _ensure_display_name(self) -> None:
+        desired_name = self._config.mtx_displayName.strip()
+        if not desired_name:
+            return
+
+        user_id = self._resolved_user.strip()
+        if not user_id:
+            raise RuntimeError("Matrix Benutzer-ID ist unbekannt, Display-Name kann nicht gesetzt werden")
+
+        current_name = await self._get_display_name(user_id)
+        if current_name == desired_name:
+            return
+
+        homeserver = self._config.mtx_homeserver.rstrip("/")
+        safe_user_id = requests.utils.quote(user_id, safe="")
+        url = f"{homeserver}/_matrix/client/v3/profile/{safe_user_id}/displayname"
+        headers = {"Authorization": f"Bearer {self._get_access_token()}"}
+
+        try:
+            response = await asyncio.to_thread(
+                requests.put,
+                url,
+                headers=headers,
+                json={"displayname": desired_name},
+                timeout=15,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            raise RuntimeError(f"Matrix displayname-Update fehlgeschlagen: {exc}") from exc
+
+        print(f"Matrix Display-Name gesetzt: {desired_name}")
+
+    async def _prompt_verification_decision(self, prompt: str) -> str:
+        async with self._verification_lock:
+            return (await asyncio.to_thread(input, prompt)).strip().lower()
+
+    async def _handle_to_device_event(self, event: object) -> None:
+        client = self.client
+
+        if isinstance(event, nio.KeyVerificationStart):
+            if "emoji" not in event.short_authentication_string:
+                print(
+                    "Matrix Verifikation abgelehnt: Gegenstelle unterstuetzt keine Emoji-Verifikation "
+                    f"({event.short_authentication_string})."
+                )
+                await client.cancel_key_verification(event.transaction_id, reject=False)
+                return
+
+            print(
+                "Matrix Verifikationsanfrage empfangen "
+                f"von {event.sender} ({event.from_device}), Transaktion {event.transaction_id}."
+            )
+            resp = await client.accept_key_verification(event.transaction_id)
+            if isinstance(resp, nio.ToDeviceError):
+                print(f"Matrix accept_key_verification fehlgeschlagen: {resp}")
+                return
+
+            sas = client.key_verifications.get(event.transaction_id)
+            if sas is None:
+                print(f"Matrix SAS-Session nicht gefunden: {event.transaction_id}")
+                return
+
+            resp = await client.to_device(sas.share_key())
+            if isinstance(resp, nio.ToDeviceError):
+                print(f"Matrix share_key fehlgeschlagen: {resp}")
+            return
+
+        if isinstance(event, nio.KeyVerificationCancel):
+            print(
+                "Matrix Verifikation abgebrochen "
+                f"von {event.sender}: {event.reason} ({event.code})"
+            )
+            return
+
+        if isinstance(event, nio.KeyVerificationKey):
+            sas = client.key_verifications.get(event.transaction_id)
+            if sas is None:
+                print(f"Matrix SAS-Session fuer Schluessel-Nachricht nicht gefunden: {event.transaction_id}")
+                return
+
+            emojis = ", ".join(f"{emoji} {name}" for emoji, name in sas.get_emoji())
+            print(
+                "Matrix Emoji-Abgleich fuer "
+                f"{event.sender} ({getattr(event, 'from_device', 'unbekannt')}): {emojis}"
+            )
+            choice = await self._prompt_verification_decision(
+                "Stimmen die Emojis ueberein? [j]a / [n]ein / [c]ancel: "
+            )
+            if choice == "j":
+                resp = await client.confirm_short_auth_string(event.transaction_id)
+                if isinstance(resp, nio.ToDeviceError):
+                    print(f"Matrix confirm_short_auth_string fehlgeschlagen: {resp}")
+            elif choice == "n":
+                resp = await client.cancel_key_verification(event.transaction_id, reject=True)
+                if isinstance(resp, nio.ToDeviceError):
+                    print(f"Matrix cancel_key_verification (reject) fehlgeschlagen: {resp}")
+            else:
+                resp = await client.cancel_key_verification(event.transaction_id, reject=False)
+                if isinstance(resp, nio.ToDeviceError):
+                    print(f"Matrix cancel_key_verification fehlgeschlagen: {resp}")
+            return
+
+        if isinstance(event, nio.KeyVerificationMac):
+            sas = client.key_verifications.get(event.transaction_id)
+            if sas is None:
+                print(f"Matrix SAS-Session fuer MAC-Nachricht nicht gefunden: {event.transaction_id}")
+                return
+
+            try:
+                to_device_msg = sas.get_mac()
+            except nio.LocalProtocolError as exc:
+                print(f"Matrix Verifikation konnte nicht abgeschlossen werden: {exc}")
+                return
+
+            resp = await client.to_device(to_device_msg)
+            if isinstance(resp, nio.ToDeviceError):
+                print(f"Matrix MAC-Antwort fehlgeschlagen: {resp}")
+                return
+
+            print(
+                "Matrix Geraet verifiziert: "
+                f"{event.sender}; verified={sas.verified}; devices={sas.verified_devices}"
+            )
+            return
+
     async def connect(self) -> None:
         session = self._load_session()
         use_explicit_token = bool(self._config.mtx_access_token)
@@ -385,6 +534,7 @@ class MatrixSender:
 
         self._client = self._build_client()
         client = self.client
+        client.add_to_device_callback(self._handle_to_device_event, (nio.KeyVerificationEvent,))
 
         if session is not None:
             client.restore_login(
@@ -422,6 +572,7 @@ class MatrixSender:
             user_id = str(getattr(login_resp, "user_id", "")) or self._resolved_user
             device_id = str(getattr(login_resp, "device_id", "")) or self._config.mtx_deviceId
             access_token = str(getattr(login_resp, "access_token", ""))
+            self._resolved_user = user_id
             if access_token:
                 self._save_session(user_id, device_id, access_token)
             print(f"Matrix Passwort-Login erfolgreich mit Device {device_id}")
@@ -432,6 +583,7 @@ class MatrixSender:
         # Initialer Sync ist fuer Raumzustand und Schluesselaustausch notwendig.
         await client.sync(timeout=30000, full_state=True)
         await self._accept_all_invites()
+        await self._ensure_display_name()
         self._sync_task = asyncio.create_task(self._sync_loop())
 
     async def close(self) -> None:
@@ -503,9 +655,6 @@ class MatrixSender:
             raise RuntimeError("Raum ist nicht verschluesselt. Bitte im Matrix-Client Verschluesselung aktivieren.")
 
     async def send_html(self, room_id: str, html_text: str) -> None:
-        await self._ensure_joined(room_id)
-        await self._ensure_encryption(room_id)
-
         client = self.client
         formatted_html = _normalize_matrix_html(html_text)
         content = {
@@ -514,19 +663,26 @@ class MatrixSender:
             "format": "org.matrix.custom.html",
             "formatted_body": formatted_html,
         }
+        room_ids = [rid.strip() for rid in room_id.split(",") if rid.strip()]
+        if not room_ids:
+            raise ValueError("Keine gueltige Matrix Room-ID angegeben")
 
-        send_kwargs: dict[str, Any] = {
-            "room_id": room_id,
-            "message_type": "m.room.message",
-            "content": content,
-        }
         send_sig = inspect.signature(client.room_send)
-        if "ignore_unverified_devices" in send_sig.parameters:
-            send_kwargs["ignore_unverified_devices"] = self._config.mtx_ignore_unverified_devices
+        send_resp: nio.RoomSendResponse | nio.RoomSendError
+        for rid in room_ids:
+            await self._ensure_joined(rid)
+            await self._ensure_encryption(rid)
+            send_kwargs: dict[str, Any] = {
+                "room_id": rid,
+                "message_type": "m.room.message",
+                "content": content,
+            }
+            if "ignore_unverified_devices" in send_sig.parameters:
+                send_kwargs["ignore_unverified_devices"] = self._config.mtx_ignore_unverified_devices
 
-        send_resp = await client.room_send(**send_kwargs)
-        if isinstance(send_resp, nio.RoomSendError):
-            raise RuntimeError(f"Matrix send fehlgeschlagen: {send_resp.message}")
+            send_resp = await client.room_send(**send_kwargs)
+            if isinstance(send_resp, nio.RoomSendError):
+                raise RuntimeError(f"Matrix send fehlgeschlagen fuer {rid}: {send_resp.message}")
 
 
 async def send_to_matrix(profile: Profile, text: str) -> None:
