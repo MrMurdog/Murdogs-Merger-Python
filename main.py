@@ -73,10 +73,12 @@ class Config:
 
 
 CONFIG: Config | None = None
+CONFIG_PATH: Path | None = None
 MTX_CLIENT: nio.AsyncClient | None = None
 MATRIX_SENDER: "MatrixSender | None" = None
 PENDING: dict[str, asyncio.Queue[EventData]] = {}
 WORKER_TASKS: dict[str, asyncio.Task[None]] = {}
+CONFIG_RELOAD_TASK: asyncio.Task[None] | None = None
 RIC_ENCRYPTOR = CompactEncryptor(secret_key=984264)
 
 
@@ -145,6 +147,25 @@ def load_config(path: Path) -> Config:
 def get_profile(name: str) -> Profile:
     assert CONFIG is not None
     return CONFIG.profiles.get(name, CONFIG.default)
+
+
+def is_matrix_enabled(config: Config) -> bool:
+    return bool(config.mtx_homeserver and (config.mtx_access_token or (config.mtx_user and config.mtx_passwd)))
+
+
+def _matrix_runtime_signature(config: Config) -> tuple[str, ...]:
+    return (
+        config.mtx_homeserver,
+        config.mtx_user,
+        config.mtx_passwd,
+        config.mtx_access_token,
+        config.mtx_displayName,
+        config.mtx_deviceId,
+        config.mtx_store_path,
+        config.mtx_session_file,
+        str(config.mtx_ignore_unverified_devices),
+        str(config.mtx_require_encryption),
+    )
 
 
 def escape_discord_markdown(text: str | None) -> str | None:
@@ -385,6 +406,8 @@ class MatrixSender:
 
         try:
             response = await asyncio.to_thread(requests.get, url, headers=headers, timeout=15)
+            if response.status_code == 404:
+                return ""
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:
@@ -694,8 +717,6 @@ async def send_to_matrix(profile: Profile, text: str) -> None:
 
 
 async def worker_task(name: str) -> None:
-    profile = get_profile(name)
-    time_window = profile.time_window_sec
     grouped: dict[str, list[EventData]] = {}
     last_event_time = 0.0
     has_events = False
@@ -704,6 +725,8 @@ async def worker_task(name: str) -> None:
     while True:
         await asyncio.sleep(0.1)
         now = time.time()
+        profile = get_profile(name)
+        time_window = profile.time_window_sec
 
         try:
             data = queue.get_nowait()
@@ -722,6 +745,7 @@ async def worker_task(name: str) -> None:
             has_events = True
 
         if has_events and (now - last_event_time) >= time_window:
+            profile = get_profile(name)
             for events in grouped.values():
                 if not events:
                     continue
@@ -843,22 +867,93 @@ async def close_matrix_client() -> None:
     MTX_CLIENT = None
 
 
-async def main() -> None:
+async def reload_config_if_needed(path: Path, previous_mtime_ns: int | None) -> int | None:
     global CONFIG
+
+    try:
+        current_mtime_ns = path.stat().st_mtime_ns
+    except FileNotFoundError:
+        print("config.json wurde nicht gefunden, bestehende Konfiguration bleibt aktiv")
+        return previous_mtime_ns
+
+    if previous_mtime_ns is not None and current_mtime_ns == previous_mtime_ns:
+        return previous_mtime_ns
+
+    try:
+        new_config = load_config(path)
+    except Exception as exc:
+        print(f"config.json Reload fehlgeschlagen, bestehende Konfiguration bleibt aktiv: {exc}")
+        return previous_mtime_ns
+
+    old_config = CONFIG
+    old_matrix_enabled = is_matrix_enabled(old_config) if old_config is not None else False
+    new_matrix_enabled = is_matrix_enabled(new_config)
+    matrix_restart_needed = (
+        old_config is not None
+        and old_matrix_enabled
+        and new_matrix_enabled
+        and _matrix_runtime_signature(old_config) != _matrix_runtime_signature(new_config)
+    )
+
+    CONFIG = new_config
+    print("config.json neu geladen")
+
+    if old_config is not None and (
+        old_config.tcp_host != new_config.tcp_host or old_config.tcp_port != new_config.tcp_port
+    ):
+        print("Hinweis: tcp_host/tcp_port wurden geaendert und gelten erst nach Neustart")
+
+    if not old_matrix_enabled and new_matrix_enabled:
+        await create_matrix_client()
+        print("Matrix Client nach Config-Reload gestartet")
+    elif old_matrix_enabled and not new_matrix_enabled:
+        await close_matrix_client()
+        print("Matrix Client nach Config-Reload gestoppt")
+    elif matrix_restart_needed:
+        await close_matrix_client()
+        await create_matrix_client()
+        print("Matrix Client nach Config-Reload neu gestartet")
+
+    return current_mtime_ns
+
+
+async def config_reload_loop(path: Path) -> None:
+    known_mtime_ns: int | None = None
+    while True:
+        try:
+            known_mtime_ns = await reload_config_if_needed(path, known_mtime_ns)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"Config-Reload Fehler: {exc}")
+        await asyncio.sleep(1)
+
+
+async def main() -> None:
+    global CONFIG, CONFIG_PATH, CONFIG_RELOAD_TASK
 
     config_path = Path("config.json")
     if not config_path.exists():
         raise FileNotFoundError("config.json nicht gefunden (im Python-Ordner erwartet)")
 
+    CONFIG_PATH = config_path
     CONFIG = load_config(config_path)
 
-    matrix_enabled = bool(CONFIG.mtx_homeserver and (CONFIG.mtx_access_token or (CONFIG.mtx_user and CONFIG.mtx_passwd)))
-    if matrix_enabled:
+    if is_matrix_enabled(CONFIG):
         await create_matrix_client()
+
+    CONFIG_RELOAD_TASK = asyncio.create_task(config_reload_loop(config_path))
 
     try:
         await tcp_server()
     finally:
+        if CONFIG_RELOAD_TASK is not None:
+            CONFIG_RELOAD_TASK.cancel()
+            try:
+                await CONFIG_RELOAD_TASK
+            except asyncio.CancelledError:
+                pass
+            CONFIG_RELOAD_TASK = None
         await close_matrix_client()
 
 
