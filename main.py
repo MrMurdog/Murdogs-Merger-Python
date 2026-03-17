@@ -258,6 +258,7 @@ async def send_to_telegram(profile: Profile, text: str) -> None:
         "chat_id": chat_id,
         "text": text,
         "parse_mode": parse_mode,
+        "link_preview_options": {"is_disabled": True},
     }
     resp = await asyncio.to_thread(requests.post, url, json=payload, timeout=15)
     print(f"Telegram-Nachricht gesendet: {resp.status_code}")
@@ -677,6 +678,25 @@ class MatrixSender:
         if room is None or not bool(getattr(room, "encrypted", False)):
             raise RuntimeError("Raum ist nicht verschluesselt. Bitte im Matrix-Client Verschluesselung aktivieren.")
 
+    async def _prepare_room_for_send(self, room_id: str) -> None:
+        client = self.client
+        await client.sync(timeout=1000, full_state=True)
+
+        room = client.rooms.get(room_id)
+        if room is None or not bool(getattr(room, "encrypted", False)):
+            return
+
+        invalidate_session = getattr(client, "invalidate_outbound_session", None)
+        if invalidate_session is None:
+            return
+
+        try:
+            result = invalidate_session(room_id)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            print(f"Matrix Outbound-Session konnte nicht rotiert werden ({room_id}): {exc}")
+
     async def send_html(self, room_id: str, html_text: str) -> None:
         client = self.client
         formatted_html = _normalize_matrix_html(html_text)
@@ -695,6 +715,7 @@ class MatrixSender:
         for rid in room_ids:
             await self._ensure_joined(rid)
             await self._ensure_encryption(rid)
+            await self._prepare_room_for_send(rid)
             send_kwargs: dict[str, Any] = {
                 "room_id": rid,
                 "message_type": "m.room.message",
