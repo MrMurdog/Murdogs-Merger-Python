@@ -290,59 +290,68 @@ async def send_to_discord_webhook(profile: Profile, text: str) -> None:
     resp = await asyncio.to_thread(requests.post, webhook_url, json={"content": text}, timeout=15)
     print(f"Discord Webhook Nachricht gesendet: {resp.status_code}")
 
-async def get_geo_data(geoServer: str, message: str, regEx: str) -> str:
+async def get_geo_data(geoServer: str | None, message: str, regEx: str | None) -> str:
+    if not geoServer or not regEx:
+        return ""
+
     match = re.search(regEx, message)
+    if not match:
+        return ""
 
-    if match:
-        street          =       match.group('streetname')
-        hnr             =       match.group('streetnumber')
-        locality        =       match.group('locality')
-        sublocality     =       match.group('sublocality')
+    street = match.groupdict().get("streetname", "")
+    hnr = match.groupdict().get("streetnumber", "")
+    locality = match.groupdict().get("locality", "")
+    sublocality = match.groupdict().get("sublocality", "")
 
-        if street:
-            street = re.sub(r'(?<!^)(?=[A-Z])', ' ', street)
+    if street:
+        street = re.sub(r"(?<!^)(?=[A-Z])", " ", street)
 
-        address = f"{street}, {hnr}, {sublocality}, {locality}"
+    address_parts = [part for part in (street, hnr, sublocality, locality) if part]
+    address = ", ".join(address_parts)
+    if not address:
+        return ""
 
-        ntm_params = {
-            "limit": 1,
-            "addressdetails": 1,
-            "format": "json",
-            "q": address
-        }
+    ntm_params = {
+        "limit": 1,
+        "addressdetails": 1,
+        "format": "json",
+        "q": address,
+    }
 
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.get(
-                    f"{geoServer}/search",
-                    params=ntm_params,
-                    headers={
-                        "User-Agent": "MurdogsMerger",
-                        "Accept": "application/json"
-                    }
-                )
-                response.raise_for_status()
-                ntm_data = json.loads(str(response.json()))
-                print(f"Nomitamin hat  {len(ntm_data)}  Ergebnisse für  {address}  gefunden")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                f"{geoServer.rstrip('/')}/search",
+                params=ntm_params,
+                headers={
+                    "User-Agent": "MurdogsMerger",
+                    "Accept": "application/json",
+                },
+            )
+            response.raise_for_status()
+            ntm_data = response.json()
+            print(f"Nominatim hat {len(ntm_data)} Ergebnisse fuer {address} gefunden")
 
-                lat = ntm_data['lat']
-                lon = ntm_data['lon']
+            if not ntm_data:
+                return ""
 
-                cords = f"{lat}, {lon}"
+            result = ntm_data[0]
+            lat = result.get("lat")
+            lon = result.get("lon")
+            if not lat or not lon:
+                return ""
 
-                return cords
+            return f"{lat}, {lon}"
 
-        except httpx.TimeoutException:
-            print("Nomitamin Timeout")
-            return ""
-
-        except httpx.HTTPStatusError as e:
-            print(f"Nominatim HTTP error {e.response.status_code} for address: {address}")
-            return ""
-
-        except Exception as e:
-            print(f"Nominatim request failed for address '{address}': {str(e)}")
-            return ""
+    except httpx.TimeoutException:
+        print("Nominatim Timeout")
+        return ""
+    except httpx.HTTPStatusError as e:
+        print(f"Nominatim HTTP error {e.response.status_code} for address: {address}")
+        return ""
+    except Exception as e:
+        print(f"Nominatim request failed for address '{address}': {str(e)}")
+        return ""
 
 
 def _html_to_matrix_plaintext(text: str) -> str:
