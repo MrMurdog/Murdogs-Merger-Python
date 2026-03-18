@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import httpx
 import html as html_lib
 import inspect
 import json
@@ -53,6 +54,9 @@ class Profile:
 
     mtx_room: str | None = None
 
+    geo_data_server: str | None = None
+    geo_data_regex: str | None = None
+
 
 @dataclass(slots=True)
 class Config:
@@ -100,7 +104,9 @@ def _profile_from_dict(data: dict[str, Any]) -> Profile:
         pushover_app_token=data.get("pushover_app_token"),
         pushover_user_key=data.get("pushover_user_key"),
         discord_wh_url=data.get("discord_wh_url"),
-        mtx_room=data.get("mtx_room")
+        mtx_room=data.get("mtx_room"),
+        geo_data_server=data.get("geo_data_server"),
+        geo_data_regex=data.get("geo_data_regex")
     )
 
 
@@ -283,6 +289,60 @@ async def send_to_discord_webhook(profile: Profile, text: str) -> None:
     webhook_url = profile.discord_wh_url or ""
     resp = await asyncio.to_thread(requests.post, webhook_url, json={"content": text}, timeout=15)
     print(f"Discord Webhook Nachricht gesendet: {resp.status_code}")
+
+async def get_geo_data(geoServer: str, message: str, regEx: str) -> str:
+    match = re.search(regEx, message)
+
+    if match:
+        street          =       match.group('streetname')
+        hnr             =       match.group('streetnumber')
+        locality        =       match.group('locality')
+        sublocality     =       match.group('sublocality')
+
+        if street:
+            street = re.sub(r'(?<!^)(?=[A-Z])', ' ', street)
+
+        address = f"{street}, {hnr}, {sublocality}, {locality}"
+
+        ntm_params = {
+            "limit": 1,
+            "addressdetails": 1,
+            "format": "json",
+            "q": address
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.get(
+                    f"{geoServer}/search",
+                    params=ntm_params,
+                    headers={
+                        "User-Agent": "MurdogsMerger",
+                        "Accept": "application/json"
+                    }
+                )
+                response.raise_for_status()
+                ntm_data = json.loads(response.json())
+                print(f"Nomitamin hat  {len(ntm_data)}  Ergebnisse für  {address}  gefunden")
+
+                lat = ntm_data['lat']
+                lon = ntm_data['lon']
+
+                cords = f"{lat}, {lon}"
+
+                return cords
+
+        except httpx.TimeoutException:
+            print("Nomitamin Timeout")
+            return ""
+
+        except httpx.HTTPStatusError as e:
+            print(f"Nominatim HTTP error {e.response.status_code} for address: {address}")
+            return ""
+
+        except Exception as e:
+            print(f"Nominatim request failed for address '{address}': {str(e)}")
+            return ""
 
 
 def _html_to_matrix_plaintext(text: str) -> str:
@@ -772,6 +832,7 @@ async def worker_task(name: str) -> None:
                     continue
 
                 text = format_output(events, profile)
+                text = text.replace("%cords%", await get_geo_data(profile.geo_data_server, text, profile.geo_data_regex))
                 sender = profile.sender or "none"
 
                 try:
