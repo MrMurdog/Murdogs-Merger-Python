@@ -322,7 +322,7 @@ async def get_geo_data(geoServer: str, message: str, regEx: str) -> str:
                     }
                 )
                 response.raise_for_status()
-                ntm_data = json.loads(response.json())
+                ntm_data = json.loads(str(response.json()))
                 print(f"Nomitamin hat  {len(ntm_data)}  Ergebnisse für  {address}  gefunden")
 
                 lat = ntm_data['lat']
@@ -832,7 +832,7 @@ async def worker_task(name: str) -> None:
                     continue
 
                 text = format_output(events, profile)
-                text = text.replace("%cords%", await get_geo_data(profile.geo_data_server, text, profile.geo_data_regex))
+                text = text.replace("&cords&", await get_geo_data(profile.geo_data_server, text, profile.geo_data_regex))
                 sender = profile.sender or "none"
 
                 try:
