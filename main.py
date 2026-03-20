@@ -234,6 +234,29 @@ def replace_placeholders(template: str, event_data: EventData) -> str:
 
     return re.sub(r"%([\w\.]+)%", replace_generic, text)
 
+def replace_placeholders(template: str, event_data: EventData) -> str:
+    text = template
+    dt = datetime.fromtimestamp(event_data.timestamp)
+    text = text.replace("%timestamp%", dt.strftime("%d.%m.%Y %H:%M:%S"))
+
+    def replace_enc_ric(_: re.Match[str]) -> str:
+        try:
+            telegram = event_data.raw.get("telegram")
+            if isinstance(telegram, dict):
+                address_obj = telegram.get("address")
+                if address_obj is not None:
+                    return RIC_ENCRYPTOR.encrypt(int(str(address_obj)))
+        except Exception as exc:
+            print(f"Fehler beim Verschluesseln von address mit enc_ric: {exc}")
+        return ""
+
+    text = re.sub(r"%enc_ric%", replace_enc_ric, text)
+
+    def replace_generic(match: re.Match[str]) -> str:
+        return _resolve_path(event_data.raw, match.group(1))
+
+    return re.sub(r"%([\w\.]+)%", replace_generic, text)
+
 
 def format_output(events: list[EventData], profile: Profile) -> str:
     beschreibungen = [replace_placeholders(profile.beschreibung_format, e) for e in events]
@@ -857,6 +880,9 @@ async def worker_task(name: str) -> None:
                 cords = await get_geo_data(profile.geo_data_server, text, profile.geo_data_regex)
                 text = text.replace("&cords&", cords)
                 sender = profile.sender or "none"
+
+                if not cords:
+                    cords = replace_placeholders("%telegram.location.lat%, %telegram.location.lng%", events[0])
 
                 try:
                     if "rocketchat" in sender:
