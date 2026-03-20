@@ -853,9 +853,8 @@ async def worker_task(name: str) -> None:
                 if not events:
                     continue
 
-                cords = await get_geo_data(profile.geo_data_server, text, profile.geo_data_regex)
-
                 text = format_output(events, profile)
+                cords = await get_geo_data(profile.geo_data_server, text, profile.geo_data_regex)
                 text = text.replace("&cords&", cords)
                 sender = profile.sender or "none"
 
