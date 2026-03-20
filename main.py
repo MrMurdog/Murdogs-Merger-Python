@@ -290,6 +290,8 @@ async def send_to_telegram(profile: Profile, text: str, cords: str) -> None:
         "link_preview_options": {"is_disabled": True},
     }
 
+    print("Debug Ausgabe:", cords)
+
     if "," in cords.strip():
         payload["reply_markup"] = {
             "inline_keyboard": [
