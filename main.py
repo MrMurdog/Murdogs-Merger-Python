@@ -254,7 +254,7 @@ async def send_to_rocketchat(profile: Profile, text: str) -> None:
     print(f"RocketChat-Nachricht wuerde an {rc_channel} gesendet")
 
 
-async def send_to_telegram(profile: Profile, text: str) -> None:
+async def send_to_telegram(profile: Profile, text: str, cords: str) -> None:
     bot_token = profile.tg_bot_token or ""
     chat_id = profile.tg_chat_id or "0"
     parse_mode = "HTML" if (profile.tg_parse_mode or "").lower() == "html" else "MarkdownV2"
@@ -266,6 +266,19 @@ async def send_to_telegram(profile: Profile, text: str) -> None:
         "parse_mode": parse_mode,
         "link_preview_options": {"is_disabled": True},
     }
+
+    if cords:
+        payload["reply_markup"] = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "🗺️ Geo Daten",
+                        "url": f"https://maps.google.de/?q={cords}",
+                    }
+                ]
+            ]
+        }
+
     resp = await asyncio.to_thread(requests.post, url, json=payload, timeout=15)
     print(f"Telegram-Nachricht gesendet: {resp.status_code}")
 
@@ -840,15 +853,17 @@ async def worker_task(name: str) -> None:
                 if not events:
                     continue
 
+                cords = await get_geo_data(profile.geo_data_server, text, profile.geo_data_regex)
+
                 text = format_output(events, profile)
-                text = text.replace("&cords&", await get_geo_data(profile.geo_data_server, text, profile.geo_data_regex))
+                text = text.replace("&cords&", cords)
                 sender = profile.sender or "none"
 
                 try:
                     if "rocketchat" in sender:
                         await send_to_rocketchat(profile, text)
                     if "telegram" in sender:
-                        await send_to_telegram(profile, text)
+                        await send_to_telegram(profile, text, cords)
                     if "pushover" in sender:
                         await send_to_pushover(profile, text)
                     if "discordWh" in sender:
